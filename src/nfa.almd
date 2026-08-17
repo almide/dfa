@@ -1,0 +1,170 @@
+// almide/dfa — Thompson construction
+//
+// Builds ONE NFA for the whole pattern set: state 0 is the shared start,
+// and each pattern keeps its own accept state tagged with the pattern's
+// index. Fusing here is what lets the final automaton answer "which of
+// the N patterns matches at this position" in a single pass.
+//
+// Flat representation, for the same reason syntax.almd keeps ranges flat:
+//
+//   eps      [from, to,          ...]   pairs
+//   edges    [from, lo, hi, to,  ...]   quads — inclusive codepoint range
+//   accepts  [state, pattern_id, ...]   pairs
+
+import self.syntax
+
+type Nfa = {
+  n: Int,           // state count; 0 is the shared start
+  eps: List[Int],
+  edges: List[Int],
+  accepts: List[Int],
+}
+
+// A machine under construction plus one entry and one exit state.
+type Frag = { nfa: Nfa, start: Int, out: Int }
+
+// ── Entry point ────────────────────────────────────
+
+// An indexed walk rather than fold-over-enumerate: enumerate over heap
+// elements has no wasm rendering yet.
+fn build(asts: List[syntax.Node]) -> Nfa =
+  build_walk(asts, 0, Nfa { n: 1, eps: [], edges: [], accepts: [] })
+
+local fn build_walk(asts: List[syntax.Node], id: Int, m: Nfa) -> Nfa =
+  if id >= list.len(asts) then m
+  else {
+    let f = thompson(m, list.get_or(asts, id, syntax.Empty))
+    build_walk(asts, id + 1, {
+      ...f.nfa,
+      eps: f.nfa.eps + [0, f.start],
+      accepts: f.nfa.accepts + [f.out, id],
+    })
+  }
+
+// ── Thompson construction ──────────────────────────
+//
+// Every fragment gets a fresh entry and a fresh exit state, so `start`
+// never has an incoming edge and `out` never an outgoing one — the
+// invariant that keeps every composition rule a pure ε-wiring step.
+
+fn thompson(m: Nfa, node: syntax.Node) -> Frag = match node {
+  syntax.Empty => {
+    let s = m.n
+    Frag { nfa: { ...m, n: s + 2, eps: m.eps + [s, s + 1] }, start: s, out: s + 1 }
+  },
+  syntax.Lit(c) => class_frag(m, [c, c]),
+  syntax.Class(rs) => class_frag(m, rs),
+  syntax.Cat(xs) => cat_frag(m, xs),
+  syntax.Alt(xs) => alt_frag(m, xs),
+  syntax.Star(x) => wrap_frag(m, x, true, true),
+  syntax.Plus(x) => wrap_frag(m, x, false, true),
+  syntax.Opt(x) => wrap_frag(m, x, true, false),
+}
+
+// One consuming step: start -[each range]-> out.
+local fn class_frag(m: Nfa, rs: List[Int]) -> Frag = {
+  let s = m.n
+  Frag {
+    nfa: { ...m, n: s + 2, edges: m.edges + range_edges(rs, 0, s, s + 1) },
+    start: s,
+    out: s + 1,
+  }
+}
+
+// [lo, hi, ...] becomes [s, lo, hi, e, ...].
+local fn range_edges(rs: List[Int], i: Int, s: Int, e: Int) -> List[Int] =
+  if i + 1 >= list.len(rs) then []
+  else [s, list.get_or(rs, i, 0), list.get_or(rs, i + 1, 0), e]
+    + range_edges(rs, i + 2, s, e)
+
+// Chain: each fragment's exit ε-wired to the next fragment's entry.
+local fn cat_frag(m: Nfa, xs: List[syntax.Node]) -> Frag = {
+  let first = thompson(m, list.get_or(xs, 0, syntax.Empty))
+  list.fold(list.drop(xs, 1), first, (acc, x) => {
+    let f = thompson(acc.nfa, x)
+    Frag {
+      nfa: { ...f.nfa, eps: f.nfa.eps + [acc.out, f.start] },
+      start: acc.start,
+      out: f.out,
+    }
+  })
+}
+
+// Fan out: one shared entry and exit around every branch.
+local fn alt_frag(m: Nfa, xs: List[syntax.Node]) -> Frag = {
+  let s = m.n
+  let joined = list.fold(xs, { ...m, n: s + 2 }, (acc, x) => {
+    let f = thompson(acc, x)
+    { ...f.nfa, eps: f.nfa.eps + [s, f.start, f.out, s + 1] }
+  })
+  Frag { nfa: joined, start: s, out: s + 1 }
+}
+
+// Star/Plus/Opt share one shell: a fresh entry/exit pair around the inner
+// fragment, a skip edge (entry→exit) when zero repetitions are allowed,
+// a back edge (inner.out→inner.start) when more than one is.
+local fn wrap_frag(m: Nfa, x: syntax.Node, skip: Bool, back: Bool) -> Frag = {
+  let s = m.n
+  let f = thompson({ ...m, n: s + 2 }, x)
+  let skip_eps = if skip then [s, s + 1] else []
+  let back_eps = if back then [f.out, f.start] else []
+  Frag {
+    nfa: { ...f.nfa, eps: f.nfa.eps + [s, f.start, f.out, s + 1] + skip_eps + back_eps },
+    start: s,
+    out: s + 1,
+  }
+}
+
+// ── Running the NFA ────────────────────────────────
+//
+// Used by subset construction only, never at match time. State sets are
+// sorted Int lists.
+
+// ε-closure: grow the set to a fixpoint, one sweep of the ε list per round.
+fn closure(m: Nfa, set: List[Int]) -> List[Int] = {
+  let grown = closure_step(m.eps, 0, set)
+  if list.len(grown) == list.len(set) then list.sort(set) else closure(m, grown)
+}
+
+local fn closure_step(eps: List[Int], i: Int, acc: List[Int]) -> List[Int] =
+  if i + 1 >= list.len(eps) then acc
+  else {
+    let src = list.get_or(eps, i, 0)
+    let dst = list.get_or(eps, i + 1, 0)
+    let grown = if list.contains(acc, src) and not list.contains(acc, dst)
+      then acc + [dst]
+      else acc
+    closure_step(eps, i + 2, grown)
+  }
+
+// States reachable on codepoint `c`: one consuming step, no closure.
+fn step(m: Nfa, set: List[Int], c: Int) -> List[Int] = move_walk(m.edges, 0, set, c, [])
+
+local fn move_walk(
+  edges: List[Int],
+  i: Int,
+  set: List[Int],
+  c: Int,
+  acc: List[Int],
+) -> List[Int] =
+  if i + 3 >= list.len(edges) then list.sort(acc)
+  else {
+    let hit = c >= list.get_or(edges, i + 1, 0)
+      and c <= list.get_or(edges, i + 2, 0)
+      and list.contains(set, list.get_or(edges, i, 0))
+    let dst = list.get_or(edges, i + 3, 0)
+    let grown = if hit and not list.contains(acc, dst) then acc + [dst] else acc
+    move_walk(edges, i + 4, set, c, grown)
+  }
+
+// Lowest pattern id accepting anywhere in `set`, or -1. Lowest, because a
+// length tie between two patterns goes to the one listed first.
+fn accept_of(m: Nfa, set: List[Int]) -> Int = accept_walk(m.accepts, 0, set, 0 - 1)
+
+local fn accept_walk(accepts: List[Int], i: Int, set: List[Int], best: Int) -> Int =
+  if i + 1 >= list.len(accepts) then best
+  else {
+    let id = list.get_or(accepts, i + 1, 0)
+    let hit = list.contains(set, list.get_or(accepts, i, 0)) and (best < 0 or id < best)
+    accept_walk(accepts, i + 2, set, if hit then id else best)
+  }
