@@ -1,0 +1,73 @@
+// almide/dfa — subset construction
+//
+// Fuses the NFA into a deterministic table. Two ideas:
+//
+// 1. The alphabet is not codepoints but equivalence classes: cut the
+//    codepoint space at every range boundary any pattern mentions. Inside
+//    one cut, every codepoint behaves identically, so a handful of classes
+//    stands in for all 1,114,112 codepoints — and one representative per
+//    class is enough to probe the NFA.
+// 2. The classic worklist: each DFA state is a sorted set of NFA states,
+//    keyed by its rendered form. The empty set is never materialized —
+//    it is the -1 reject entry in the table.
+
+import self.syntax
+import self.nfa
+import self.table
+
+fn construct(m: nfa.Nfa) -> table.Dfa = {
+  let starts = class_starts(m.edges)
+  let nsym = list.len(starts)
+  let first = nfa.closure(m, [0])
+  var sets: List[List[Int]] = [first]
+  var ids: Map[String, Int] = [:]
+  ids = map.set(ids, key(first), 0)
+  var trans: List[Int] = []
+  var accept: List[Int] = []
+  var at = 0
+  while at < list.len(sets) {
+    let cur = list.get_or(sets, at, [])
+    accept = accept + [nfa.accept_of(m, cur)]
+    for k in 0 ..< nsym {
+      let rep = list.get_or(starts, k, 0)
+      let dst = nfa.closure(m, nfa.step(m, cur, rep))
+      if list.is_empty(dst) then {
+        trans = trans + [0 - 1]
+      } else {
+        match map.get(ids, key(dst)) {
+          some(id) => {
+            trans = trans + [id]
+          },
+          none => {
+            let id = list.len(sets)
+            sets = sets + [dst]
+            ids = map.set(ids, key(dst), id)
+            trans = trans + [id]
+          },
+        }
+      }
+    }
+    at = at + 1
+  }
+  table.Dfa { nsym: nsym, starts: starts, trans: trans, accept: accept }
+}
+
+// A state set's identity, e.g. "0,3,7". Sets arrive sorted from closure,
+// so equal sets always render equally.
+local fn key(set: List[Int]) -> String =
+  list.map(set, int.to_string) |> list.join(",")
+
+// Cut points of the codepoint space: 0, every range's lo, and every
+// range's hi + 1. Between consecutive cuts no pattern can tell two
+// codepoints apart.
+local fn class_starts(edges: List[Int]) -> List[Int] =
+  list.sort(list.unique([0] + cut_points(edges, 0)))
+
+local fn cut_points(edges: List[Int], i: Int) -> List[Int] =
+  if i + 3 >= list.len(edges) then []
+  else {
+    let lo = list.get_or(edges, i + 1, 0)
+    let hi = list.get_or(edges, i + 2, 0)
+    let cuts = if hi >= syntax.MAX_CP then [lo] else [lo, hi + 1]
+    cuts + cut_points(edges, i + 4)
+  }

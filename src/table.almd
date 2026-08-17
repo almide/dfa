@@ -1,0 +1,79 @@
+// almide/dfa — the compiled artifact
+//
+// What a lexer actually runs. The codepoint space is cut into equivalence
+// classes — contiguous runs no pattern can tell apart — and the automaton
+// is a dense state × class table. Matching is: classify the codepoint,
+// index the table, remember the last accepting state passed.
+//
+//   starts   class k covers codepoints [starts[k], starts[k+1] - 1];
+//            starts[0] is always 0, the last class runs to MAX_CP
+//   trans    row-major state × class; -1 = reject
+//   accept   pattern id accepted by each state, -1 = none; state 0 = start
+
+type Dfa = {
+  nsym: Int,
+  starts: List[Int],
+  trans: List[Int],
+  accept: List[Int],
+}
+
+// What a lexer needs and nothing more: which pattern, and how far.
+type Match = { id: Int, len: Int }
+
+// ── Lookup ─────────────────────────────────────────
+
+// Equivalence class of a codepoint: the greatest k with starts[k] <= c.
+fn class_of(d: Dfa, c: Int) -> Int = class_search(d.starts, 0, list.len(d.starts) - 1, c)
+
+local fn class_search(starts: List[Int], lo: Int, hi: Int, c: Int) -> Int =
+  if lo >= hi then lo
+  else {
+    let mid = (lo + hi + 1) / 2
+    if list.get_or(starts, mid, 0) <= c then class_search(starts, mid, hi, c)
+    else class_search(starts, lo, mid - 1, c)
+  }
+
+// One transition; -1 when the state rejects the codepoint.
+fn step(d: Dfa, state: Int, c: Int) -> Int =
+  list.get_or(d.trans, state * d.nsym + class_of(d, c), 0 - 1)
+
+// ── Scanning ───────────────────────────────────────
+
+// Longest pattern matching at `at`, or none. Walks forward until a dead
+// transition or the end of input, remembering the last accepting state —
+// that is leftmost-longest, in one pass, with no backtracking. Positions
+// past the end behave like the end.
+fn scan_cps(d: Dfa, cps: List[Int], at: Int) -> Match? = {
+  let n = list.len(cps)
+  var state = 0
+  var i = at
+  var best_id = 0 - 1
+  var best_len = 0
+  var walking = true
+  while walking {
+    let tag = list.get_or(d.accept, state, 0 - 1)
+    if tag >= 0 then {
+      best_id = tag
+      best_len = i - at
+    } else ()
+    if i >= n then walking = false
+    else {
+      let next = step(d, state, list.get_or(cps, i, 0))
+      if next < 0 then walking = false
+      else {
+        state = next
+        i = i + 1
+      }
+    }
+  }
+  found(best_id, best_len)
+}
+
+// A branch returning `none` against a constructed record walls the wasm
+// renderer ("empty deferred heap value"), whichever way it is spelled.
+// Branching on List — where the empty case is `[]` — lowers, and
+// `list.first` turns the 0-or-1 element list into the Option.
+local fn found(id: Int, len: Int) -> Match? = {
+  let hits: List[Match] = if id < 0 then [] else [Match { id: id, len: len }]
+  list.first(hits)
+}
