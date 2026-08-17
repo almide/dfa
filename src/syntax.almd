@@ -1,0 +1,341 @@
+// almide/dfa — regular expression syntax
+//
+// Parses the regular subset only. Anything that is not a regular language
+// (backreferences, lookaround, anchors) is rejected here rather than quietly
+// ignored, because the whole point of this package is that every pattern
+// compiles to a DFA.
+//
+//   syntax.parse("[a-z_][a-z0-9_]*")
+//
+// ── Representation note ────────────────────────────
+//
+// A character class is a FLAT list of inclusive codepoint ranges:
+//
+//   [lo0, hi0, lo1, hi1, ...]      always sorted and merged
+//
+// not `List[(Int, Int)]`. A variant carrying a list of tuples is outside the
+// WASM MIR-lowering subset, and `Class` is a variant. The flat form is also
+// what the transition tables want later, so nothing is lost.
+
+// ── AST ────────────────────────────────────────────
+
+type Node =
+  | Empty
+  | Lit(Int)
+  | Class(List[Int])
+  | Cat(List[Node])
+  | Alt(List[Node])
+  | Star(Node)
+  | Plus(Node)
+  | Opt(Node)
+
+let MAX_CP = 1114111
+
+// A parse step: the node produced, and the position just past it.
+type Cursor = { node: Node, pos: Int }
+
+// ── Entry point ────────────────────────────────────
+
+fn parse(pattern: String) -> Result[Node, String] = {
+  let cps = to_codepoints(pattern)
+  let c = parse_alt(cps, 0)!
+  let leftover = cp_str(list.get_or(cps, c.pos, 0))
+  guard c.pos >= list.len(cps) else err("unexpected '${leftover}' at ${int.to_string(c.pos)}")
+  ok(c.node)
+}
+
+fn to_codepoints(s: String) -> List[Int] =
+  list.map(string.chars(s), (ch) => string.codepoint(ch) ?? 0)
+
+fn cp_str(c: Int) -> String = string.from_codepoint(c)
+
+// True when `pos` is in range and holds codepoint `c`.
+local fn at(cps: List[Int], pos: Int, c: Int) -> Bool =
+  pos < list.len(cps) and list.get_or(cps, pos, 0 - 1) == c
+
+// ── alt := cat ('|' cat)* ──────────────────────────
+
+fn parse_alt(cps: List[Int], pos: Int) -> Result[Cursor, String] = {
+  let first = parse_cat(cps, pos)!
+  parse_alt_rest(cps, first.pos, [first.node])
+}
+
+local fn parse_alt_rest(
+  cps: List[Int],
+  pos: Int,
+  acc: List[Node],
+) -> Result[Cursor, String] =
+  if at(cps, pos, 124) then {
+    let next = parse_cat(cps, pos + 1)!
+    parse_alt_rest(cps, next.pos, acc + [next.node])
+  }
+  else if list.len(acc) == 1 then ok(Cursor { node: list.get_or(acc, 0, Empty), pos: pos })
+  else ok(Cursor { node: Alt(acc), pos: pos })
+
+// ── cat := piece* ──────────────────────────────────
+
+fn parse_cat(cps: List[Int], pos: Int) -> Result[Cursor, String] =
+  parse_cat_rest(cps, pos, [])
+
+local fn parse_cat_rest(
+  cps: List[Int],
+  pos: Int,
+  acc: List[Node],
+) -> Result[Cursor, String] =
+  if pos >= list.len(cps) or at(cps, pos, 124) or at(cps, pos, 41)
+    then ok(Cursor { node: collapse(acc), pos: pos })
+    else {
+      let piece = parse_piece(cps, pos)!
+      parse_cat_rest(cps, piece.pos, acc + [piece.node])
+    }
+
+fn collapse(acc: List[Node]) -> Node =
+  if list.is_empty(acc) then Empty
+  else if list.len(acc) == 1 then list.get_or(acc, 0, Empty)
+  else Cat(acc)
+
+// ── piece := atom quantifier* ──────────────────────
+
+fn parse_piece(cps: List[Int], pos: Int) -> Result[Cursor, String] = {
+  let atom = parse_atom(cps, pos)!
+  apply_quantifiers(cps, atom.pos, atom.node)
+}
+
+local fn apply_quantifiers(
+  cps: List[Int],
+  pos: Int,
+  node: Node,
+) -> Result[Cursor, String] =
+  if at(cps, pos, 42) then apply_quantifiers(cps, pos + 1, Star(node))
+  else if at(cps, pos, 43) then apply_quantifiers(cps, pos + 1, Plus(node))
+  else if at(cps, pos, 63) then apply_quantifiers(cps, pos + 1, Opt(node))
+  else if at(cps, pos, 123) then {
+    let rep = parse_repeat(cps, pos, node)!
+    apply_quantifiers(cps, rep.pos, rep.node)
+  }
+  else ok(Cursor { node: node, pos: pos })
+
+// ── atom ───────────────────────────────────────────
+
+fn parse_atom(cps: List[Int], pos: Int) -> Result[Cursor, String] = {
+  guard pos < list.len(cps) else err("unexpected end of pattern")
+  let c = list.get_or(cps, pos, 0)
+  let where = int.to_string(pos)
+  if c == 40 then {
+    let inner = parse_alt(cps, pos + 1)!
+    guard at(cps, inner.pos, 41) else err("unclosed '(' at ${where}")
+    ok(Cursor { node: inner.node, pos: inner.pos + 1 })
+  }
+  else if c == 91 then parse_class(cps, pos + 1)
+  else if c == 46 then ok(Cursor { node: Class([0, MAX_CP]), pos: pos + 1 })
+  else if c == 92 then parse_escape(cps, pos + 1)
+  else if c == 41 then err("unmatched ')' at ${where}")
+  else if c == 42 or c == 43 or c == 63 then
+    err("quantifier '${cp_str(c)}' with nothing to repeat at ${where}")
+  else if c == 94 or c == 36 then
+    err("anchor '${cp_str(c)}' is not supported — this package matches at a given position")
+  else ok(Cursor { node: Lit(c), pos: pos + 1 })
+}
+
+// ── escape ─────────────────────────────────────────
+
+fn parse_escape(cps: List[Int], pos: Int) -> Result[Cursor, String] = {
+  guard pos < list.len(cps) else err("pattern ends with a backslash")
+  let c = list.get_or(cps, pos, 0)
+  let cls = escape_class(c)
+  if not list.is_empty(cls) then ok(Cursor { node: Class(cls), pos: pos + 1 })
+  else if c >= 49 and c <= 57 then
+    err("backreference '\\${cp_str(c)}' is not a regular language")
+  else if c == 98 or c == 66 then err("word boundary '\\${cp_str(c)}' is not supported")
+  else ok(Cursor { node: Lit(escape_literal(c)), pos: pos + 1 })
+}
+
+// Ranges for \d \w \s and their negations. Empty means "not a class escape".
+fn escape_class(c: Int) -> List[Int] =
+  if c == 100 then DIGIT
+  else if c == 68 then negate(DIGIT)
+  else if c == 119 then WORD
+  else if c == 87 then negate(WORD)
+  else if c == 115 then SPACE
+  else if c == 83 then negate(SPACE)
+  else []
+
+fn escape_literal(c: Int) -> Int =
+  if c == 110 then 10
+  else if c == 116 then 9
+  else if c == 114 then 13
+  else if c == 102 then 12
+  else if c == 118 then 11
+  else if c == 48 then 0
+  else c
+
+let DIGIT = [48, 57]
+let WORD = [48, 57, 65, 90, 95, 95, 97, 122]
+let SPACE = [9, 13, 32, 32]
+
+// ── character class ────────────────────────────────
+//
+// `pos` points just past '['. A ']' in first position is a literal, and a '-'
+// in first or last position is a literal — POSIX behaviour, and what every
+// dialect this package cares about does.
+
+// Accumulated class members plus the position just past ']'.
+type ClassBody = { ranges: List[Int], pos: Int }
+
+fn parse_class(cps: List[Int], pos: Int) -> Result[Cursor, String] = {
+  let negated = at(cps, pos, 94)
+  let start = if negated then pos + 1 else pos
+  let body = parse_class_body(cps, start, [], true)!
+  let merged = if negated then negate(body.ranges) else body.ranges
+  ok(Cursor { node: Class(merged), pos: body.pos })
+}
+
+local fn parse_class_body(
+  cps: List[Int],
+  pos: Int,
+  acc: List[Int],
+  first: Bool,
+) -> Result[ClassBody, String] = {
+  guard pos < list.len(cps) else err("unclosed '['")
+  let c = list.get_or(cps, pos, 0)
+  if c == 93 and not first then ok(ClassBody { ranges: acc, pos: pos + 1 })
+  else {
+    let item = parse_class_item(cps, pos)!
+    parse_class_body(cps, item.pos, union(acc, item.ranges), false)
+  }
+}
+
+// One class member: an escape, a range `a-z`, or a single character.
+local fn parse_class_item(cps: List[Int], pos: Int) -> Result[ClassBody, String] = {
+  let c = list.get_or(cps, pos, 0)
+  if c == 92 then {
+    guard pos + 1 < list.len(cps) else err("class ends with a backslash")
+    let e = list.get_or(cps, pos + 1, 0)
+    let cls = escape_class(e)
+    if not list.is_empty(cls) then ok(ClassBody { ranges: cls, pos: pos + 2 })
+    else class_single(cps, pos + 2, escape_literal(e))
+  }
+  else class_single(cps, pos + 1, c)
+}
+
+// Having consumed a low endpoint, look for `-hi`.
+local fn class_single(cps: List[Int], pos: Int, lo: Int) -> Result[ClassBody, String] =
+  if at(cps, pos, 45) and pos + 1 < list.len(cps) and not at(cps, pos + 1, 93) then {
+    let escaped = at(cps, pos + 1, 92)
+    guard not (escaped and pos + 2 >= list.len(cps)) else err("class range ends with a backslash")
+    let hi = if escaped
+      then escape_literal(list.get_or(cps, pos + 2, 0))
+      else list.get_or(cps, pos + 1, 0)
+    guard lo <= hi else err("reversed range in class")
+    ok(ClassBody { ranges: [lo, hi], pos: if escaped then pos + 3 else pos + 2 })
+  }
+  else ok(ClassBody { ranges: [lo, lo], pos: pos })
+
+// ── counted repetition {n} {n,} {n,m} ──────────────
+
+fn parse_repeat(cps: List[Int], pos: Int, node: Node) -> Result[Cursor, String] = {
+  let where = int.to_string(pos)
+  let lo = read_int(cps, pos + 1)
+  guard lo.pos > pos + 1 else err("'{' without a count at ${where}")
+  if at(cps, lo.pos, 125) then
+    ok(Cursor { node: expand(node, lo.value, lo.value), pos: lo.pos + 1 })
+  else {
+    guard at(cps, lo.pos, 44) else err("malformed '{...}' at ${where}")
+    if at(cps, lo.pos + 1, 125) then
+      ok(Cursor { node: expand_open(node, lo.value), pos: lo.pos + 2 })
+    else {
+      let hi = read_int(cps, lo.pos + 1)
+      guard hi.pos > lo.pos + 1 else err("malformed '{...}' at ${where}")
+      guard at(cps, hi.pos, 125) else err("unclosed '{' at ${where}")
+      guard lo.value <= hi.value else err("reversed '{n,m}' at ${where}")
+      ok(Cursor { node: expand(node, lo.value, hi.value), pos: hi.pos + 1 })
+    }
+  }
+}
+
+// A decimal run: its value and the position just past it.
+type IntRead = { value: Int, pos: Int }
+
+local fn read_int(cps: List[Int], pos: Int) -> IntRead = read_int_rest(cps, pos, 0)
+
+local fn read_int_rest(cps: List[Int], pos: Int, acc: Int) -> IntRead = {
+  let c = list.get_or(cps, pos, 0)
+  if pos < list.len(cps) and c >= 48 and c <= 57
+    then read_int_rest(cps, pos + 1, acc * 10 + (c - 48))
+    else IntRead { value: acc, pos: pos }
+}
+
+// {n,m} becomes n copies followed by (m-n) optional copies.
+fn expand(node: Node, lo: Int, hi: Int) -> Node =
+  collapse(list.repeat(node, lo) + list.repeat(Opt(node), hi - lo))
+
+// {n,} becomes n-1 copies followed by one Plus, or a Star when n is 0.
+fn expand_open(node: Node, lo: Int) -> Node =
+  if lo == 0 then Star(node)
+  else collapse(list.repeat(node, lo - 1) + [Plus(node)])
+
+// ── flat range set algebra ─────────────────────────
+//
+// Every function here takes and returns the flat [lo, hi, lo, hi, ...] form,
+// sorted and merged. Insertion keeps the invariant, so no sort is ever needed:
+// classes hold a handful of ranges, and each insert is a single walk.
+
+// Add one inclusive range, absorbing anything it touches.
+fn insert_range(rs: List[Int], lo: Int, hi: Int) -> List[Int] =
+  if lo > hi then rs else insert_walk(rs, 0, lo, hi, [])
+
+local fn insert_walk(
+  rs: List[Int],
+  i: Int,
+  lo: Int,
+  hi: Int,
+  acc: List[Int],
+) -> List[Int] =
+  if i + 1 >= list.len(rs) then acc + [lo, hi]
+  else {
+    let a = list.get_or(rs, i, 0)
+    let b = list.get_or(rs, i + 1, 0)
+    if b + 1 < lo then insert_walk(rs, i + 2, lo, hi, acc + [a, b])
+    else if hi + 1 < a then acc + [lo, hi] + list.drop(rs, i)
+    else insert_walk(rs, i + 2, int.min(lo, a), int.max(hi, b), acc)
+  }
+
+// Sort and merge an arbitrary flat range list.
+fn normalize(rs: List[Int]) -> List[Int] = union([], rs)
+
+// Merge `add` into the already-normalized `base`.
+fn union(base: List[Int], add: List[Int]) -> List[Int] = union_walk(base, add, 0)
+
+local fn union_walk(base: List[Int], add: List[Int], i: Int) -> List[Int] =
+  if i + 1 >= list.len(add) then base
+  else union_walk(
+    insert_range(base, list.get_or(add, i, 0), list.get_or(add, i + 1, 0)),
+    add,
+    i + 2,
+  )
+
+// Complement over the whole codepoint space.
+fn negate(rs: List[Int]) -> List[Int] = negate_walk(normalize(rs), 0, 0, [])
+
+local fn negate_walk(
+  rs: List[Int],
+  i: Int,
+  cursor: Int,
+  acc: List[Int],
+) -> List[Int] =
+  if i + 1 >= list.len(rs) then
+    if cursor <= MAX_CP then acc + [cursor, MAX_CP] else acc
+  else {
+    let a = list.get_or(rs, i, 0)
+    let b = list.get_or(rs, i + 1, 0)
+    let gap = if cursor < a then [cursor, a - 1] else []
+    negate_walk(rs, i + 2, b + 1, acc + gap)
+  }
+
+// Membership test on a normalized flat range list.
+fn matches(rs: List[Int], c: Int) -> Bool = matches_walk(rs, 0, c)
+
+local fn matches_walk(rs: List[Int], i: Int, c: Int) -> Bool =
+  if i + 1 >= list.len(rs) then false
+  else if c >= list.get_or(rs, i, 0) and c <= list.get_or(rs, i + 1, 0) then true
+  else matches_walk(rs, i + 2, c)

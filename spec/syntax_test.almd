@@ -1,0 +1,261 @@
+import self.syntax
+
+// Constructors are written qualified on purpose: a selective import of a
+// variant constructor (`import self.syntax.{Lit}`) currently fails IR verify.
+
+fn p(pattern: String) -> syntax.Node = match syntax.parse(pattern) {
+  ok(n) => n,
+  err(e) => {
+    println("PARSE ERROR: ${e}")
+    syntax.Empty
+  },
+}
+
+fn failed(pattern: String) -> Bool = match syntax.parse(pattern) {
+  ok(_) => false,
+  err(_) => true,
+}
+
+fn cp(ch: String) -> Int = string.codepoint(ch) ?? 0
+
+// ═══════════════════════════════════════════════════
+// Literals and concatenation
+// ═══════════════════════════════════════════════════
+
+test "empty pattern" {
+  assert_eq(p(""), syntax.Empty)
+}
+
+test "single literal" {
+  assert_eq(p("a"), syntax.Lit(97))
+}
+
+test "concatenation" {
+  assert_eq(p("ab"), syntax.Cat([syntax.Lit(97), syntax.Lit(98)]))
+}
+
+test "non-ascii literal is one codepoint" {
+  assert_eq(p("あ"), syntax.Lit(12354))
+}
+
+// ═══════════════════════════════════════════════════
+// Quantifiers
+// ═══════════════════════════════════════════════════
+
+test "star" {
+  assert_eq(p("a*"), syntax.Star(syntax.Lit(97)))
+}
+
+test "plus" {
+  assert_eq(p("a+"), syntax.Plus(syntax.Lit(97)))
+}
+
+test "opt" {
+  assert_eq(p("a?"), syntax.Opt(syntax.Lit(97)))
+}
+
+test "quantifier binds to the last atom only" {
+  assert_eq(p("ab*"), syntax.Cat([syntax.Lit(97), syntax.Star(syntax.Lit(98))]))
+}
+
+test "stacked quantifiers" {
+  assert_eq(p("a*?"), syntax.Opt(syntax.Star(syntax.Lit(97))))
+}
+
+test "quantifier with nothing to repeat is rejected" {
+  assert(failed("*a"))
+  assert(failed("+"))
+}
+
+// ═══════════════════════════════════════════════════
+// Groups and alternation
+// ═══════════════════════════════════════════════════
+
+test "group" {
+  assert_eq(p("(ab)"), syntax.Cat([syntax.Lit(97), syntax.Lit(98)]))
+}
+
+test "group with quantifier" {
+  assert_eq(p("(ab)*"), syntax.Star(syntax.Cat([syntax.Lit(97), syntax.Lit(98)])))
+}
+
+test "alternation" {
+  assert_eq(p("a|b"), syntax.Alt([syntax.Lit(97), syntax.Lit(98)]))
+}
+
+test "alternation is flat, not nested" {
+  assert_eq(p("a|b|c"), syntax.Alt([syntax.Lit(97), syntax.Lit(98), syntax.Lit(99)]))
+}
+
+test "alternation binds looser than concatenation" {
+  assert_eq(p("ab|c"), syntax.Alt([syntax.Cat([syntax.Lit(97), syntax.Lit(98)]), syntax.Lit(99)]))
+}
+
+test "empty alternative" {
+  assert_eq(p("a|"), syntax.Alt([syntax.Lit(97), syntax.Empty]))
+}
+
+test "unclosed group is rejected" {
+  assert(failed("(ab"))
+  assert(failed("ab)"))
+}
+
+// ═══════════════════════════════════════════════════
+// Character classes
+// ═══════════════════════════════════════════════════
+
+test "class range" {
+  assert_eq(p("[a-z]"), syntax.Class([97, 122]))
+}
+
+test "class singles are merged when adjacent" {
+  assert_eq(p("[abc]"), syntax.Class([97, 99]))
+}
+
+test "class singles stay separate when apart" {
+  assert_eq(p("[ax]"), syntax.Class([97, 97, 120, 120]))
+}
+
+test "class is order independent" {
+  assert_eq(p("[c-ea-b]"), syntax.Class([97, 101]))
+}
+
+test "closing bracket first is a literal" {
+  assert_eq(p("[]]"), syntax.Class([93, 93]))
+}
+
+test "trailing dash is a literal" {
+  assert_eq(p("[a-]"), syntax.Class([45, 45, 97, 97]))
+}
+
+test "negated class" {
+  assert_eq(p("[^a]"), syntax.Class([0, 96, 98, 1114111]))
+}
+
+test "negated range" {
+  assert_eq(p("[^a-z]"), syntax.Class([0, 96, 123, 1114111]))
+}
+
+test "reversed range is rejected" {
+  assert(failed("[z-a]"))
+}
+
+test "unclosed class is rejected" {
+  assert(failed("[abc"))
+}
+
+// ═══════════════════════════════════════════════════
+// Escapes
+// ═══════════════════════════════════════════════════
+
+test "dot is every codepoint" {
+  assert_eq(p("."), syntax.Class([0, 1114111]))
+}
+
+test "digit class" {
+  assert_eq(p("\\d"), syntax.Class([48, 57]))
+}
+
+test "word class" {
+  assert_eq(p("\\w"), syntax.Class([48, 57, 65, 90, 95, 95, 97, 122]))
+}
+
+test "negated digit class" {
+  assert_eq(p("\\D"), syntax.Class([0, 47, 58, 1114111]))
+}
+
+test "escaped metacharacter is a literal" {
+  assert_eq(p("\\*"), syntax.Lit(42))
+  assert_eq(p("\\["), syntax.Lit(91))
+  assert_eq(p("\\\\"), syntax.Lit(92))
+}
+
+test "control escapes" {
+  assert_eq(p("\\n"), syntax.Lit(10))
+  assert_eq(p("\\t"), syntax.Lit(9))
+}
+
+test "class escape inside a class" {
+  assert_eq(p("[\\d]"), syntax.Class([48, 57]))
+}
+
+test "escaped dash inside a class is a literal" {
+  assert_eq(p("[\\-]"), syntax.Class([45, 45]))
+}
+
+test "trailing backslash is rejected" {
+  assert(failed("a\\"))
+}
+
+// ═══════════════════════════════════════════════════
+// Rejected: not regular languages
+// ═══════════════════════════════════════════════════
+
+test "backreference is rejected" {
+  assert(failed("(a)\\1"))
+}
+
+test "word boundary is rejected" {
+  assert(failed("\\bword"))
+}
+
+test "anchors are rejected" {
+  assert(failed("^a"))
+  assert(failed("a$"))
+}
+
+// ═══════════════════════════════════════════════════
+// Counted repetition
+// ═══════════════════════════════════════════════════
+
+test "exact count" {
+  assert_eq(p("a{3}"), syntax.Cat([syntax.Lit(97), syntax.Lit(97), syntax.Lit(97)]))
+}
+
+test "bounded range" {
+  assert_eq(p("a{1,3}"), syntax.Cat([syntax.Lit(97), syntax.Opt(syntax.Lit(97)), syntax.Opt(syntax.Lit(97))]))
+}
+
+test "open range" {
+  assert_eq(p("a{2,}"), syntax.Cat([syntax.Lit(97), syntax.Plus(syntax.Lit(97))]))
+}
+
+test "zero open range is a star" {
+  assert_eq(p("a{0,}"), syntax.Star(syntax.Lit(97)))
+}
+
+test "malformed brace is rejected" {
+  assert(failed("a{"))
+  assert(failed("a{2"))
+  assert(failed("a{3,1}"))
+}
+
+// ═══════════════════════════════════════════════════
+// Range set algebra
+// ═══════════════════════════════════════════════════
+
+test "normalize merges overlapping ranges" {
+  assert_eq(syntax.normalize([5, 10, 8, 12]), [5, 12])
+}
+
+test "normalize merges adjacent ranges" {
+  assert_eq(syntax.normalize([5, 7, 8, 10]), [5, 10])
+}
+
+test "normalize keeps disjoint ranges apart" {
+  assert_eq(syntax.normalize([8, 10, 1, 3]), [1, 3, 8, 10])
+}
+
+test "negate is an involution" {
+  let r = [97, 122, 48, 57]
+  assert_eq(syntax.negate(syntax.negate(r)), syntax.normalize(r))
+}
+
+test "negate of everything is empty" {
+  assert_eq(syntax.negate([0, 1114111]), [])
+}
+
+test "matches" {
+  assert(syntax.matches([97, 122], 100))
+  assert(not syntax.matches([97, 122], 65))
+}
