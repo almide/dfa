@@ -1,0 +1,151 @@
+import self as dfa
+import self.table
+
+fn build(patterns: List[String]) -> table.Dfa = match dfa.compile(patterns) {
+  ok(d) => d,
+  err(e) => {
+    println("COMPILE ERROR: ${e}")
+    table.Dfa { nsym: 0, starts: [], trans: [], accept: [] }
+  },
+}
+
+// A match flattened for assert_eq: [id, len], or [] for none.
+fn hit(d: table.Dfa, input: String, at: Int) -> List[Int] = match dfa.scan(d, input, at) {
+  some(m) => [m.id, m.len],
+  none => [],
+}
+
+// ═══════════════════════════════════════════════════
+// Longest match — the reason this package exists
+// ═══════════════════════════════════════════════════
+
+test "single literal" {
+  assert_eq(hit(build(["a"]), "a", 0), [0, 1])
+}
+
+test "longest wins, not the first alternative" {
+  let d = build(["=", "=="])
+  assert_eq(hit(d, "==", 0), [1, 2])
+  assert_eq(hit(d, "=x", 0), [0, 1])
+}
+
+test "keyword prefixes do not steal the longer keyword" {
+  let d = build(["in", "instanceof", "[a-z]+"])
+  assert_eq(hit(d, "instanceof", 0), [1, 10])
+  assert_eq(hit(d, "in", 0), [0, 2])
+  assert_eq(hit(d, "inst", 0), [2, 4])
+}
+
+test "a length tie goes to the lower pattern id" {
+  assert_eq(hit(build(["if", "[a-z]+"]), "if", 0), [0, 2])
+}
+
+test "longest across patterns, not per pattern" {
+  // \d+ matches "42", but \w+ reaches further — length beats listing order.
+  assert_eq(hit(build(["\\d+", "\\w+"]), "42x", 0), [1, 3])
+}
+
+// ═══════════════════════════════════════════════════
+// Scanning at a position
+// ═══════════════════════════════════════════════════
+
+test "scan matches at the position, it does not search" {
+  let d = build(["b"])
+  assert_eq(hit(d, "ab", 0), [])
+  assert_eq(hit(d, "ab", 1), [0, 1])
+}
+
+test "positions are codepoints, not bytes" {
+  let d = build(["[ぁ-ん]+"])
+  assert_eq(hit(d, "xかな", 1), [0, 2])
+}
+
+test "no pattern matches" {
+  assert_eq(hit(build(["[0-9]+"]), "abc", 0), [])
+}
+
+test "star can match empty" {
+  let d = build(["a*"])
+  assert_eq(hit(d, "aaa", 0), [0, 3])
+  assert_eq(hit(d, "b", 0), [0, 0])
+  assert_eq(hit(d, "aa", 2), [0, 0])
+}
+
+test "the end of input is a valid position" {
+  assert_eq(hit(build(["x?"]), "x", 1), [0, 0])
+  assert_eq(hit(build(["x"]), "x", 1), [])
+}
+
+test "an empty pattern set never matches" {
+  assert_eq(hit(build([]), "anything", 0), [])
+}
+
+// ═══════════════════════════════════════════════════
+// Pattern features end to end
+// ═══════════════════════════════════════════════════
+
+test "dot is any codepoint, newline included" {
+  let d = build(["a.c"])
+  assert_eq(hit(d, "axc", 0), [0, 3])
+  assert_eq(hit(d, "a\nc", 0), [0, 3])
+  assert_eq(hit(d, "ac", 0), [])
+}
+
+test "counted repetition" {
+  let d = build(["a{2,3}"])
+  assert_eq(hit(d, "aaaa", 0), [0, 3])
+  assert_eq(hit(d, "aa", 0), [0, 2])
+  assert_eq(hit(d, "a", 0), [])
+}
+
+test "negated class" {
+  let d = build(["[^0-9]+"])
+  assert_eq(hit(d, "ab1", 0), [0, 2])
+  assert_eq(hit(d, "12", 0), [])
+}
+
+test "alternation with groups" {
+  let d = build(["(ab|cd)+"])
+  assert_eq(hit(d, "abcdab", 0), [0, 6])
+  assert_eq(hit(d, "abc", 0), [0, 2])
+}
+
+test "a broken pattern reports its index" {
+  match dfa.compile(["a", "(b"]) {
+    ok(_) => assert(false),
+    err(e) => assert(string.starts_with(e, "pattern 1:")),
+  }
+}
+
+// ═══════════════════════════════════════════════════
+// The lexer loop
+// ═══════════════════════════════════════════════════
+
+fn lex(d: table.Dfa, cps: List[Int], at: Int, acc: List[Int]) -> List[Int] =
+  match dfa.scan_cps(d, cps, at) {
+    some(m) => if m.len == 0 then acc else lex(d, cps, at + m.len, acc + [m.id]),
+    none => acc,
+  }
+
+test "convert once, scan per position" {
+  let d = build(["let", "[a-z]+", "[0-9]+", " +", "="])
+  let toks = lex(d, dfa.codepoints("let x = 42"), 0, [])
+  assert_eq(toks, [0, 3, 1, 3, 4, 3, 2])
+}
+
+// ═══════════════════════════════════════════════════
+// Minimization, observed from outside
+// ═══════════════════════════════════════════════════
+
+test "equivalent patterns compile to the same number of states" {
+  let a = build(["ab|ac"])
+  let b = build(["a(b|c)"])
+  assert_eq(list.len(a.accept), list.len(b.accept))
+}
+
+test "the table stays small for a real token set" {
+  let d = build(["[a-z_][a-z0-9_]*", "[0-9]+", "[ \t\n]+", "==", "=", ";"])
+  // linear in the pattern set, not in the codepoint space
+  assert(list.len(d.accept) < 16)
+  assert(d.nsym < 16)
+}

@@ -1,0 +1,51 @@
+// almide/dfa — multi-pattern DFA matching
+//
+// Compiles a SET of regular expressions into a single deterministic
+// automaton and reports the leftmost-longest match in linear time.
+//
+//   let d = dfa.compile(["=", "==", "[a-z]+"])!
+//   dfa.scan(d, "==", 0)      // some(Match { id: 1, len: 2 }) — longest wins
+//
+// The pipeline: syntax → nfa (Thompson) → subset construction → minimize.
+// Everything here is glue; the work happens in the sibling modules.
+
+import self.syntax
+import self.nfa
+import self.subset
+import self.minimize
+import self.table
+
+// Compile a pattern set. A pattern's index in the list is its token id;
+// when two patterns match the same length, the lower id wins — so list
+// keywords before the identifier pattern that would swallow them.
+fn compile(patterns: List[String]) -> Result[table.Dfa, String] = {
+  let asts = parse_all(patterns)!
+  ok(minimize.minimize(subset.construct(nfa.build(asts))))
+}
+
+// A plain recursive walk: enumerate + fallible map + map_err would read
+// better, but none of the three has a wasm rendering for this shape yet.
+local fn parse_all(patterns: List[String]) -> Result[List[syntax.Node], String] =
+  parse_walk(patterns, 0, [])
+
+local fn parse_walk(
+  patterns: List[String],
+  i: Int,
+  acc: List[syntax.Node],
+) -> Result[List[syntax.Node], String] =
+  if i >= list.len(patterns) then ok(acc)
+  else match syntax.parse(list.get_or(patterns, i, "")) {
+    ok(n) => parse_walk(patterns, i + 1, acc + [n]),
+    err(e) => err("pattern ${int.to_string(i)}: ${e}"),
+  }
+
+// Longest pattern matching at `at`, or none. Matches AT the position —
+// it never searches forward; that is the caller's loop.
+fn scan(d: table.Dfa, input: String, at: Int) -> table.Match? =
+  table.scan_cps(d, codepoints(input), at)
+
+// The lexer-loop shape: convert the input once, then scan per position.
+fn scan_cps(d: table.Dfa, cps: List[Int], at: Int) -> table.Match? =
+  table.scan_cps(d, cps, at)
+
+fn codepoints(s: String) -> List[Int] = syntax.to_codepoints(s)

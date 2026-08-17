@@ -21,13 +21,17 @@ With first-win alternation, a lexer that knows both `=` and `==` can never produ
 
 The two are complementary rather than competing. Use `almide/regex` to manipulate text; use `almide/dfa` when the pattern set is fixed and the input is large.
 
-## Planned API
+## API
 
 ```almide
-// Compile a pattern set. Index in the list becomes the token id.
-fn compile(patterns: List[String]) -> Dfa
+import dfa
 
-// Longest pattern matching at `at`, or None.
+// Compile a pattern set. Index in the list becomes the token id;
+// a length tie goes to the lower id, so list keywords first.
+fn compile(patterns: List[String]) -> Result[Dfa, String]
+
+// Longest pattern matching at `at`, or none. Matches AT the position —
+// it never searches forward; that is the caller's loop.
 fn scan(dfa: Dfa, input: String, at: Int) -> Match?
 
 // Match { id: Int, len: Int }
@@ -35,16 +39,35 @@ fn scan(dfa: Dfa, input: String, at: Int) -> Match?
 
 `scan` is the shape a lexer needs: at this position, which pattern matched, and how far.
 
+```almide
+let d = dfa.compile(["let", "[a-z]+", "[0-9]+", " +", "="])!
+dfa.scan(d, "letter", 0)     // some(Match { id: 1, len: 6 }) — longest wins
+dfa.scan(d, "let x", 0)      // some(Match { id: 0, len: 3 }) — tie → lower id
+```
+
+For the lexer loop, convert the input once and scan per position:
+
+```almide
+let cps = dfa.codepoints(input)
+dfa.scan_cps(d, cps, at)
+```
+
 ## Pipeline
 
 ```
 pattern set
-  → parse         (shared dialect with stdlib/regex)
-  → NFA           (Thompson construction)
-  → DFA           (subset construction, all patterns fused)
-  → minimize      (Hopcroft)
-  → transition table
+  → parse         (syntax.almd — shared dialect with stdlib/regex)
+  → NFA           (nfa.almd — Thompson construction, all patterns fused)
+  → DFA           (subset.almd — subset construction over codepoint classes)
+  → minimize      (minimize.almd — Moore partition refinement)
+  → table         (table.almd — dense state × class matrix, scanned at match time)
 ```
+
+The alphabet of the table is not codepoints but equivalence classes: the
+codepoint space is cut at every range boundary any pattern mentions, so a
+handful of classes stands in for all 1,114,112 codepoints. Minimization is
+Moore refinement rather than Hopcroft — the same minimal automaton, and
+lexer tables are far too small for the asymptotic difference to matter.
 
 ## Non-goals
 
@@ -57,7 +80,10 @@ pattern set
 
 ## Status
 
-Design phase. Nothing is implemented yet.
+Implemented and tested, native and WASM. `tools/wasm-check.sh` builds the
+public API for the wasm target and fails loudly if anything walls — run it
+after touching any module; `almide test` alone can quietly fall back to
+native.
 
 ## Used by
 
