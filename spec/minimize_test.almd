@@ -1,0 +1,39 @@
+import self.minimize
+import self.table
+
+// A hand-built 3-state chain over one class: 0 → 1 → 2 → 2, where 1 and 2
+// both accept pattern 0 and behave identically — they must merge.
+test "indistinguishable accepting states merge" {
+  let d = table.Dfa {
+    nsym: 1,
+    starts: [0],
+    trans: [1, 2, 2],
+    accept: [0 - 1, 0, 0],
+  }
+  let m = minimize.minimize(d)
+  assert_eq(m.accept, [0 - 1, 0])
+  assert_eq(m.trans, [1, 1])
+}
+
+// States accepting DIFFERENT patterns are distinguishable by definition,
+// even with identical transitions — the token id is part of the answer.
+test "states accepting different patterns never merge" {
+  let d = table.Dfa {
+    nsym: 1,
+    starts: [0],
+    trans: [1, 0 - 1, 0 - 1],
+    accept: [0 - 1, 0, 1],
+  }
+  let m = minimize.minimize(d)
+  assert_eq(list.len(m.accept), 3)
+}
+
+test "minimizing a minimal table changes nothing" {
+  let d = table.Dfa {
+    nsym: 2,
+    starts: [0, 97],
+    trans: [0 - 1, 1, 0 - 1, 0 - 1],
+    accept: [0 - 1, 0],
+  }
+  assert_eq(minimize.minimize(d), d)
+}

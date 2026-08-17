@@ -1,0 +1,81 @@
+// almide/dfa — DFA minimization
+//
+// Moore partition refinement: start from "two states are equivalent iff
+// they accept the same pattern", then split any block whose members
+// disagree on which block some class leads to, and repeat to a fixpoint.
+// Same minimal automaton as Hopcroft; lexer tables are far too small for
+// the asymptotic difference to buy anything.
+
+import self.table
+
+fn minimize(d: table.Dfa) -> table.Dfa =
+  rebuild(d, refine(d, blocks_of(list.map(d.accept, int.to_string))))
+
+// Refine until the block count stops growing. Both sides of the loop are
+// canonical — blocks numbered by first appearance in state order — so an
+// equal count means the identical partition.
+local fn refine(d: table.Dfa, part: List[Int]) -> List[Int] = {
+  let next = blocks_of(signatures(d, part))
+  if count(next) == count(part) then next else refine(d, next)
+}
+
+local fn count(part: List[Int]) -> Int = (list.max(part) ?? (0 - 1)) + 1
+
+// One state's observable behaviour under the current partition: its own
+// block, then the block each class leads to. Reject stays -1.
+local fn signatures(d: table.Dfa, part: List[Int]) -> List[String] =
+  list.map(0 ..< list.len(d.accept), (s) => sig_row(d, part, s))
+
+local fn sig_row(d: table.Dfa, part: List[Int], s: Int) -> String = {
+  let row = list.map(0 ..< d.nsym, (k) => int.to_string(block_at(d, part, s, k)))
+  int.to_string(list.get_or(part, s, 0 - 1)) + "|" + list.join(row, ",")
+}
+
+local fn block_at(d: table.Dfa, part: List[Int], s: Int, k: Int) -> Int = {
+  let dst = list.get_or(d.trans, s * d.nsym + k, 0 - 1)
+  if dst < 0 then 0 - 1 else list.get_or(part, dst, 0 - 1)
+}
+
+// Dense block ids by first appearance in state order. State 0 lands in
+// block 0, so minimizing never moves the start state.
+local fn blocks_of(keys: List[String]) -> List[Int] = {
+  var ids: Map[String, Int] = [:]
+  var out: List[Int] = []
+  for k in keys {
+    match map.get(ids, k) {
+      some(b) => {
+        out = out + [b]
+      },
+      none => {
+        let b = map.len(ids)
+        ids = map.set(ids, k, b)
+        out = out + [b]
+      },
+    }
+  }
+  out
+}
+
+// Collapse each block to one state, its first member as representative —
+// every member behaves identically, that is what the fixpoint proved.
+local fn rebuild(d: table.Dfa, part: List[Int]) -> table.Dfa = {
+  let blocks = count(part)
+  // Ids were assigned by first appearance, so scanning states in order
+  // meets each block exactly when its id equals the count collected so far.
+  var reps: List[Int] = []
+  for s in 0 ..< list.len(part) {
+    if list.get_or(part, s, 0) == list.len(reps) then {
+      reps = reps + [s]
+    } else ()
+  }
+  var trans: List[Int] = []
+  var accept: List[Int] = []
+  for b in 0 ..< blocks {
+    let s = list.get_or(reps, b, 0)
+    accept = accept + [list.get_or(d.accept, s, 0 - 1)]
+    for k in 0 ..< d.nsym {
+      trans = trans + [block_at(d, part, s, k)]
+    }
+  }
+  { ...d, trans: trans, accept: accept }
+}
