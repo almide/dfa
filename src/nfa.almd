@@ -33,7 +33,7 @@ fn build(asts: List[syntax.Node]) -> Nfa =
 local fn build_walk(asts: List[syntax.Node], id: Int, m: Nfa) -> Nfa =
   if id >= list.len(asts) then m
   else {
-    let f = thompson(m, list.get_or(asts, id, syntax.Empty))
+    let f = thompson(m, list.get(asts, id) ?? syntax.Empty)
     build_walk(asts, id + 1, {
       ...f.nfa,
       eps: f.nfa.eps + [0, f.start],
@@ -74,12 +74,12 @@ local fn class_frag(m: Nfa, rs: List[Int]) -> Frag = {
 // [lo, hi, ...] becomes [s, lo, hi, e, ...].
 local fn range_edges(rs: List[Int], i: Int, s: Int, e: Int) -> List[Int] =
   if i + 1 >= list.len(rs) then []
-  else [s, list.get_or(rs, i, 0), list.get_or(rs, i + 1, 0), e]
+  else [s, list.get(rs, i) ?? 0, list.get(rs, i + 1) ?? 0, e]
     + range_edges(rs, i + 2, s, e)
 
 // Chain: each fragment's exit ε-wired to the next fragment's entry.
 local fn cat_frag(m: Nfa, xs: List[syntax.Node]) -> Frag = {
-  let first = thompson(m, list.get_or(xs, 0, syntax.Empty))
+  let first = thompson(m, list.get(xs, 0) ?? syntax.Empty)
   list.fold(list.drop(xs, 1), first, (acc, x) => {
     let f = thompson(acc.nfa, x)
     Frag {
@@ -129,8 +129,8 @@ fn closure(m: Nfa, set: List[Int]) -> List[Int] = {
 local fn closure_step(eps: List[Int], i: Int, acc: List[Int]) -> List[Int] =
   if i + 1 >= list.len(eps) then acc
   else {
-    let src = list.get_or(eps, i, 0)
-    let dst = list.get_or(eps, i + 1, 0)
+    let src = list.get(eps, i) ?? 0
+    let dst = list.get(eps, i + 1) ?? 0
     let grown = if list.contains(acc, src) and not list.contains(acc, dst)
       then acc + [dst]
       else acc
@@ -149,10 +149,10 @@ local fn move_walk(
 ) -> List[Int] =
   if i + 3 >= list.len(edges) then list.sort(acc)
   else {
-    let hit = c >= list.get_or(edges, i + 1, 0)
-      and c <= list.get_or(edges, i + 2, 0)
-      and list.contains(set, list.get_or(edges, i, 0))
-    let dst = list.get_or(edges, i + 3, 0)
+    let hit = c >= list.get(edges, i + 1) ?? 0
+      and c <= list.get(edges, i + 2) ?? 0
+      and list.contains(set, list.get(edges, i) ?? 0)
+    let dst = list.get(edges, i + 3) ?? 0
     let grown = if hit and not list.contains(acc, dst) then acc + [dst] else acc
     move_walk(edges, i + 4, set, c, grown)
   }
@@ -164,7 +164,7 @@ fn accept_of(m: Nfa, set: List[Int]) -> Int = accept_walk(m.accepts, 0, set, 0 -
 local fn accept_walk(accepts: List[Int], i: Int, set: List[Int], best: Int) -> Int =
   if i + 1 >= list.len(accepts) then best
   else {
-    let id = list.get_or(accepts, i + 1, 0)
-    let hit = list.contains(set, list.get_or(accepts, i, 0)) and (best < 0 or id < best)
+    let id = list.get(accepts, i + 1) ?? 0
+    let hit = list.contains(set, list.get(accepts, i) ?? 0) and (best < 0 or id < best)
     accept_walk(accepts, i + 2, set, if hit then id else best)
   }

@@ -34,7 +34,7 @@ local fn parse_walk(
   acc: List[syntax.Node],
 ) -> Result[List[syntax.Node], String] =
   if i >= list.len(patterns) then ok(acc)
-  else match syntax.parse(list.get_or(patterns, i, "")) {
+  else match syntax.parse(list.get(patterns, i) ?? "") {
     ok(n) => parse_walk(patterns, i + 1, acc + [n]),
     err(e) => err("pattern ${int.to_string(i)}: ${e}"),
   }

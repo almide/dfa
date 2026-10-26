@@ -16,7 +16,7 @@ fn failed(pattern: String) -> Bool = match syntax.parse(pattern) {
   err(_) => true,
 }
 
-fn cp(ch: String) -> Int = string.codepoint(ch) ?? 0
+fn cp(ch: String) -> Int = string.to_codepoint(ch) ?? 0
 
 // ═══════════════════════════════════════════════════
 // Literals and concatenation

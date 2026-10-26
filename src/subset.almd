@@ -26,10 +26,10 @@ fn construct(m: nfa.Nfa) -> table.Dfa = {
   var accept: List[Int] = []
   var at = 0
   while at < list.len(sets) {
-    let cur = list.get_or(sets, at, [])
+    let cur = list.get(sets, at) ?? []
     accept = accept + [nfa.accept_of(m, cur)]
     for k in 0 ..< nsym {
-      let rep = list.get_or(starts, k, 0)
+      let rep = list.get(starts, k) ?? 0
       let dst = nfa.closure(m, nfa.step(m, cur, rep))
       if list.is_empty(dst) then {
         trans = trans + [0 - 1]
@@ -66,8 +66,8 @@ local fn class_starts(edges: List[Int]) -> List[Int] =
 local fn cut_points(edges: List[Int], i: Int) -> List[Int] =
   if i + 3 >= list.len(edges) then []
   else {
-    let lo = list.get_or(edges, i + 1, 0)
-    let hi = list.get_or(edges, i + 2, 0)
+    let lo = list.get(edges, i + 1) ?? 0
+    let hi = list.get(edges, i + 2) ?? 0
     let cuts = if hi >= syntax.MAX_CP then [lo] else [lo, hi + 1]
     cuts + cut_points(edges, i + 4)
   }
