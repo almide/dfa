@@ -28,12 +28,12 @@ local fn signatures(d: table.Dfa, part: List[Int]) -> List[String] =
 
 local fn sig_row(d: table.Dfa, part: List[Int], s: Int) -> String = {
   let row = list.map(0 ..< d.nsym, (k) => int.to_string(block_at(d, part, s, k)))
-  int.to_string(list.get_or(part, s, 0 - 1)) + "|" + list.join(row, ",")
+  int.to_string((list.get(part, s) ?? (0 - 1))) + "|" + list.join(row, ",")
 }
 
 local fn block_at(d: table.Dfa, part: List[Int], s: Int, k: Int) -> Int = {
-  let dst = list.get_or(d.trans, s * d.nsym + k, 0 - 1)
-  if dst < 0 then 0 - 1 else list.get_or(part, dst, 0 - 1)
+  let dst = (list.get(d.trans, s * d.nsym + k) ?? (0 - 1))
+  if dst < 0 then 0 - 1 else (list.get(part, dst) ?? (0 - 1))
 }
 
 // Dense block ids by first appearance in state order. State 0 lands in
@@ -64,15 +64,15 @@ local fn rebuild(d: table.Dfa, part: List[Int]) -> table.Dfa = {
   // meets each block exactly when its id equals the count collected so far.
   var reps: List[Int] = []
   for s in 0 ..< list.len(part) {
-    if list.get_or(part, s, 0) == list.len(reps) then {
+    if (list.get(part, s) ?? (0)) == list.len(reps) then {
       reps = reps + [s]
     } else ()
   }
   var trans: List[Int] = []
   var accept: List[Int] = []
   for b in 0 ..< blocks {
-    let s = list.get_or(reps, b, 0)
-    accept = accept + [list.get_or(d.accept, s, 0 - 1)]
+    let s = (list.get(reps, b) ?? (0))
+    accept = accept + [(list.get(d.accept, s) ?? (0 - 1))]
     for k in 0 ..< d.nsym {
       trans = trans + [block_at(d, part, s, k)]
     }
