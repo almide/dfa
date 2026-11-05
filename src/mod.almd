@@ -15,6 +15,10 @@ import self.subset
 import self.minimize
 import self.table
 
+// The compiled automaton and a match, re-exported under the package name.
+type Dfa = table.Dfa
+type Match = table.Match
+
 // Compile a pattern set. A pattern's index in the list is its token id;
 // when two patterns match the same length, the lower id wins — so list
 // keywords before the identifier pattern that would swallow them.
@@ -34,7 +38,7 @@ local fn parse_walk(
   acc: List[syntax.Node],
 ) -> Result[List[syntax.Node], String] =
   if i >= list.len(patterns) then ok(acc)
-  else match syntax.parse(list.get_or(patterns, i, "")) {
+  else match syntax.parse((list.get(patterns, i) ?? (""))) {
     ok(n) => parse_walk(patterns, i + 1, acc + [n]),
     err(e) => err("pattern ${int.to_string(i)}: ${e}"),
   }
